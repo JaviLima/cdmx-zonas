@@ -1,0 +1,18 @@
+name = "cdmx-zonas-worker"
+main = "worker/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[triggers]
+crons = ["0 */6 * * *"]  # Every 6 hours
+
+[[kv_namespaces]]
+binding = "CDMX_KV"
+id = "241cc1c66e254cab84851f949aab1ae0"
+preview_id = "YOUR_KV_NAMESPACE_PREVIEW_ID"
+
+[env.production]
+name = "cdmx-zonas-worker"
+
+[env.development]
+name = "cdmx-zonas-worker-dev"
