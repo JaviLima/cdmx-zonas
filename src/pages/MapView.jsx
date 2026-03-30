@@ -6,7 +6,7 @@ export default function MapView() {
   const [neighborhoodData, setNeighborhoodData] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [dataSource, setDataSource] = useState('live') // 'live' | 'mock'
+  const [usingMock, setUsingMock] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -16,30 +16,32 @@ export default function MapView() {
       // Load GeoJSON
       let geo = null
       try {
-        const geoRes = await fetch('/cdmx-neighborhoods.geojson')
-        if (!geoRes.ok) throw new Error('GeoJSON not found')
-        geo = await geoRes.json()
+        const res = await fetch('/cdmx-neighborhoods.geojson')
+        if (!res.ok) throw new Error('GeoJSON not found')
+        geo = await res.json()
         setGeojson(geo)
-      } catch (e) {
-        setError('No se pudo cargar el mapa de colonias. Asegúrate de incluir cdmx-neighborhoods.geojson en /public.')
+      } catch {
+        setError('No se pudo cargar el archivo cdmx-neighborhoods.geojson desde /public.')
         setLoading(false)
         return
       }
 
-      // Load neighborhood prices from API
+      // Try live Worker API first
       try {
         const apiRes = await fetch('/api/neighborhoods')
-        if (apiRes.ok) {
-          const data = await apiRes.json()
+        if (!apiRes.ok) throw new Error('API unavailable')
+        const data = await apiRes.json()
+        // Check if we actually got neighborhood data (non-empty object)
+        if (data && typeof data === 'object' && Object.keys(data).length > 0) {
           setNeighborhoodData(data)
-          setDataSource('live')
+          setUsingMock(false)
         } else {
-          throw new Error('API unavailable')
+          throw new Error('Empty response')
         }
       } catch {
-        // Fall back to mock data
+        // Fall back to mock data generated from GeoJSON feature names
         setNeighborhoodData(buildMockData(geo))
-        setDataSource('mock')
+        setUsingMock(true)
       }
 
       setLoading(false)
@@ -62,86 +64,64 @@ export default function MapView() {
   if (error) {
     return (
       <div className="w-full h-full flex items-center justify-center p-8">
-        <div className="max-w-md text-center">
-          <div className="w-12 h-12 border border-red-200 rounded-full flex items-center justify-center mx-auto mb-4">
-            <svg className="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          </div>
-          <p className="text-sm text-gray-600">{error}</p>
-        </div>
+        <p className="text-sm text-gray-500 text-center max-w-sm">{error}</p>
       </div>
     )
   }
 
   return (
-    <div className="relative w-full h-full">
+    <div className="relative w-full h-full flex flex-col">
       <Map geojson={geojson} neighborhoodData={neighborhoodData} />
-      {dataSource === 'mock' && (
-        <div className="absolute top-3 right-3 z-[1000] bg-amber-50 border border-amber-200 rounded px-3 py-1.5 text-xs text-amber-700">
-          Usando datos de ejemplo. Despliega el Worker para datos reales.
+      {usingMock && (
+        <div className="absolute top-12 right-3 z-[1000] bg-amber-50 border border-amber-200 rounded px-3 py-1.5 text-xs text-amber-700 pointer-events-none">
+          Datos de ejemplo — despliega el Worker para datos reales
         </div>
       )}
     </div>
   )
 }
 
-// Generate believable mock data from GeoJSON feature names
+// Build mock neighborhood data from GeoJSON feature names
 function buildMockData(geojson) {
-  const mockPrices = {
-    'Polanco': 28000,
-    'Condesa': 22000,
-    'Roma Norte': 20000,
-    'Roma Sur': 18000,
-    'Coyoacán': 16000,
-    'Del Valle': 15000,
-    'Narvarte Poniente': 14500,
-    'Doctores': 10000,
-    'Tepito': 8000,
-    'Guerrero': 9000,
-    'Santa Fe': 26000,
-    'Lomas de Chapultepec': 35000,
-    'Pedregal': 32000,
-    'Xochimilco': 9500,
-    'Iztapalapa': 7500,
-    'Tlalpan': 12000,
-    'Azcapotzalco': 10500,
-    'Gustavo A. Madero': 9000,
-    'Cuauhtémoc': 14000,
-    'Benito Juárez': 17000,
+  const KNOWN_PRICES = {
+    'Lomas de Chapultepec': 52000, 'Santa Fe': 42000, 'Santa Fe Norte': 38000,
+    'Polanco': 36000, 'Interlomas': 32000, 'Lomas de Bezares': 30000,
+    'San Ángel': 29000, 'Hipódromo Condesa': 25000, 'Condesa': 24000,
+    'Anzures': 22000, 'Roma Norte': 20000, 'Roma Sur': 19000,
+    'Escandón': 18000, 'Del Valle': 17000, 'Del Valle Norte': 16500,
+    'Narvarte Poniente': 15500, 'Benito Juárez': 15000, 'Churubusco': 14500,
+    'Tlatelolco': 14000, 'Centro Histórico': 13500, 'Obrera': 12000,
+    'Doctores': 11500, 'Portales Norte': 13000, 'Mixcoac': 15000,
+    'Álvaro Obregón': 13000, 'San Ángel Inn': 26000, 'Pedregal': 24000,
+    'Pedregal de San Ángel': 22000, 'Pedregal de San Francisco': 15000,
+    'Coyoacán': 22000, 'Villa Coyoacán': 20000, 'Villa Quietud': 13000,
+    'Iztacalco': 10000, 'Iztacalco Norte': 9500, 'Agrícola Oriental': 9000,
+    'Santa Anita': 8500, 'Jardín Balbuena': 10500, 'Aeropuerto': 9000,
+    'Pensador Mexicano': 8500, 'Iztapalapa': 8000, 'Iztapalapa Sur': 7500,
+    'Iztapalapa Centro': 7800, 'Santa Cruz Meyehualco': 7500, 'Los Reyes': 7000,
+    'San Miguel Teotongo': 6800, 'Tláhuac': 8000, 'Xochimilco': 9500,
+    'San Gregorio Atlapulco': 8500, 'Tlalpan': 12000,
+    'Cuajimalpa': 16000, 'Azcapotzalco': 11000, 'San Álvaro': 10500,
+    'Industrial Vallejo': 10000, 'San Pedro Xalpa': 9500,
+    'Guerrero': 9000, 'Tepito': 8000, 'Peralvillo': 9500, 'Popotla': 11000,
+    'San Cosme': 12000, 'Vallejo': 10000, 'La Raza': 10500, 'Lindavista': 14000,
+    'La Villa': 11000, 'San Juan de Aragón': 10000, 'Aragón': 9500,
+    'La Villa Norte': 10500, 'Martín Carrera': 9000, 'Zacatenco': 9000,
+    'Milpa Alta': 7000, 'San Lorenzo Tlacoyucan': 6500,
   }
 
+  const ALL_SOURCES = ['inmuebles24', 'vivanuncios', 'lamudi']
   const result = {}
-  const allSources = ['inmuebles24', 'vivanuncios', 'lamudi']
 
   if (geojson?.features) {
     geojson.features.forEach((f) => {
-      const name =
-        f.properties?.NOMGEO ||
-        f.properties?.nombre ||
-        f.properties?.name ||
-        f.properties?.COLONIA
-
+      const name = f.properties?.NOMGEO
       if (!name) return
-
-      // Try exact match, then partial
-      let price = mockPrices[name]
-      if (!price) {
-        const key = Object.keys(mockPrices).find((k) =>
-          name.toLowerCase().includes(k.toLowerCase()) ||
-          k.toLowerCase().includes(name.toLowerCase())
-        )
-        if (key) price = mockPrices[key]
-      }
-      if (!price) {
-        // Random plausible price between 7k and 30k
-        price = 7000 + Math.floor(Math.random() * 23000)
-      }
-
-      const count = Math.floor(Math.random() * 40) + 2
-      const numSources = Math.floor(Math.random() * 3) + 1
-      const sources = [...allSources].sort(() => 0.5 - Math.random()).slice(0, numSources)
-
+      let price = KNOWN_PRICES[name]
+      if (!price) price = 7000 + Math.floor(Math.random() * 20000)
+      const count = Math.floor(Math.random() * 45) + 3
+      const numSrc = Math.floor(Math.random() * 3) + 1
+      const sources = [...ALL_SOURCES].sort(() => 0.5 - Math.random()).slice(0, numSrc)
       result[name] = { avgPrice: price, count, sources }
     })
   }

@@ -1,168 +1,238 @@
 /**
- * Scraper for Vivanuncios.com.mx
- * Targets rental apartments/houses in CDMX.
+ * Vivanuncios.com.mx scraper — OLX Mexico (Next.js SSR)
  *
- * Vivanuncios embeds listing data as JSON inside a <script> tag with
- * id="__NEXT_DATA__" (Next.js SSR) or as JSON-LD blocks.
+ * Strategy stack:
+ * 1. Parse __NEXT_DATA__ (primary — OLX uses Next.js SSR, data is always present)
+ * 2. Parse JSON-LD
+ * 3. HTMLRewriter / regex fallback on ad cards
+ *
+ * OLX listing URL format:
+ *   https://www.vivanuncios.com.mx/a-renta-inmuebles/[location]/[title]/[id]
  */
 
-const BASE_URL = 'https://www.vivanuncios.com.mx'
-const SEARCH_URL = `${BASE_URL}/s-renta-inmuebles/ciudad-de-mexico/v1c1001l1149p{page}`
+const BASE = 'https://www.vivanuncios.com.mx'
+// OLX search URL for renting in CDMX — the numeric suffix is the category/location code
+const SEARCH_TPL = `${BASE}/s-renta-inmuebles/ciudad-de-mexico/v1c1001l1149p{page}`
 const SOURCE = 'vivanuncios'
 
-const HEADERS = {
-  'User-Agent':
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'es-MX,es;q=0.9',
-}
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-export async function scrapeVivanuncios(maxPages = 3) {
-  const listings = []
-
+export async function scrapeVivanuncios(maxPages = 5) {
+  const all = []
   for (let page = 1; page <= maxPages; page++) {
+    const url = SEARCH_TPL.replace('{page}', page)
     try {
-      const url = SEARCH_URL.replace('{page}', page)
-      const html = await fetchPage(url)
+      const html = await fetchHTML(url, BASE)
       if (!html) break
-
-      const pageListings = parseListingsFromHTML(html)
-      if (pageListings.length === 0) break
-
-      listings.push(...pageListings)
-      await sleep(900 + Math.random() * 500)
+      const listings = extractListings(html, url)
+      if (!listings.length) break
+      all.push(...listings)
+      await sleep(700 + Math.random() * 700)
     } catch (err) {
-      console.error(`[vivanuncios] page ${page} error:`, err.message)
+      console.error(`[vivanuncios] p${page}:`, err.message)
       break
     }
   }
-
-  return listings
+  return all
 }
 
-async function fetchPage(url) {
-  const res = await fetch(url, { headers: HEADERS })
-  if (!res.ok) {
-    console.error(`[vivanuncios] HTTP ${res.status} for ${url}`)
-    return null
-  }
+async function fetchHTML(url, referer) {
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': UA,
+      Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'es-MX,es;q=0.9,en;q=0.7',
+      Referer: referer,
+      'Cache-Control': 'no-cache',
+    },
+    redirect: 'follow',
+  })
+  if (!res.ok) { console.error(`[vivanuncios] HTTP ${res.status}`); return null }
   return res.text()
 }
 
-function parseListingsFromHTML(html) {
-  const listings = []
-
-  // Strategy 1: Next.js __NEXT_DATA__
-  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
-  if (nextDataMatch) {
+function extractListings(html, pageUrl) {
+  // Strategy 1: __NEXT_DATA__ (OLX/Vivanuncios runs Next.js SSR)
+  const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
+  if (ndMatch) {
     try {
-      const nextData = JSON.parse(nextDataMatch[1])
-      const ads =
-        nextData?.props?.pageProps?.ads ||
-        nextData?.props?.pageProps?.listings ||
-        nextData?.props?.pageProps?.initialData?.listings ||
-        []
-      for (const ad of ads) {
-        const listing = parseNextDataAd(ad)
-        if (listing) listings.push(listing)
-      }
-    } catch {
-      // ignore
-    }
+      const nd = JSON.parse(ndMatch[1])
+      const listings = extractFromNextData(nd)
+      if (listings.length) return listings
+    } catch {}
   }
 
   // Strategy 2: JSON-LD
-  if (listings.length === 0) {
-    const jsonLdMatches = html.matchAll(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)
-    for (const match of jsonLdMatches) {
-      try {
-        const data = JSON.parse(match[1])
-        const items = Array.isArray(data) ? data : [data]
-        for (const item of items) {
-          if (
-            item['@type'] === 'RealEstateListing' ||
-            item['@type'] === 'Offer' ||
-            item['@type'] === 'Product'
-          ) {
-            const listing = parseJsonLdItem(item)
-            if (listing) listings.push(listing)
-          }
-        }
-      } catch {
-        // ignore
+  const jsonLdListings = extractFromJsonLd(html)
+  if (jsonLdListings.length) return jsonLdListings
+
+  // Strategy 3: Regex on OLX ad cards
+  return extractFromHtml(html)
+}
+
+function extractFromNextData(nd) {
+  const pp = nd?.props?.pageProps
+  // OLX buries ads in several possible locations depending on version
+  const candidatePaths = [
+    pp?.initialData?.listings,
+    pp?.initialData?.adsList,
+    pp?.initialData?.ads,
+    pp?.adsList,
+    pp?.ads,
+    pp?.listingData?.listings,
+    nd?.props?.initialData?.listings,
+    nd?.props?.initialData?.adsList,
+  ]
+  for (const arr of candidatePaths) {
+    if (Array.isArray(arr) && arr.length) {
+      return arr.map(mapOlxAd).filter(Boolean)
+    }
+  }
+  // Deep search: look for any array of objects with 'priceValue' or 'subject'
+  return deepFindAds(nd)
+}
+
+function deepFindAds(obj, depth = 0) {
+  if (depth > 6 || !obj || typeof obj !== 'object') return []
+  if (Array.isArray(obj)) {
+    if (obj.length > 0 && obj[0] && (obj[0].priceValue || obj[0].subject || obj[0].adId)) {
+      return obj.map(mapOlxAd).filter(Boolean)
+    }
+    for (const item of obj) {
+      const found = deepFindAds(item, depth + 1)
+      if (found.length) return found
+    }
+  } else {
+    for (const val of Object.values(obj)) {
+      const found = deepFindAds(val, depth + 1)
+      if (found.length) return found
+    }
+  }
+  return []
+}
+
+function mapOlxAd(ad) {
+  if (!ad) return null
+  // Price can be in many formats
+  const price =
+    ad.priceValue ||
+    ad.price?.value ||
+    ad.price?.amount ||
+    ad.price ||
+    null
+  const numPrice = price ? Number(String(price).replace(/[^0-9.]/g, '')) : null
+  if (!numPrice || numPrice < 1000) return null
+
+  // URL: OLX stores relative or absolute URL
+  const rawUrl = ad.url || ad.permalink || ad.adUrl || ''
+  const url = rawUrl.startsWith('http') ? rawUrl : rawUrl ? `${BASE}${rawUrl}` : null
+  // Reject if it's just the search page root
+  if (!url || url === BASE || url === `${BASE}/`) return null
+
+  // Image: OLX stores images array with cdn URLs
+  const imgs = ad.images || ad.pictures || []
+  const thumb =
+    ad.thumbnail ||
+    ad.mainImage ||
+    ad.thumbnailUrl ||
+    (Array.isArray(imgs) && imgs.length > 0 && (imgs[0]?.url || imgs[0]?.href || imgs[0])) ||
+    null
+
+  const loc = ad.location || ad.address || {}
+  const neighborhood =
+    ad.neighborhoodName ||
+    loc.neighbourhood ||
+    loc.neighborhood ||
+    loc.subLocality ||
+    loc.locality ||
+    null
+
+  return {
+    id: `${SOURCE}_${ad.id || ad.adId || Math.random().toString(36).slice(2)}`,
+    title: ad.subject || ad.title || ad.name || 'Propiedad en renta',
+    price: numPrice,
+    neighborhood: neighborhood || null,
+    size: ad.parameters?.size || ad.size || ad.area || null,
+    bedrooms: ad.parameters?.rooms || ad.rooms || ad.bedrooms || null,
+    image: cleanImageUrl(thumb),
+    url,
+    source: SOURCE,
+  }
+}
+
+function extractFromJsonLd(html) {
+  const listings = []
+  const matches = [...html.matchAll(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)]
+  for (const m of matches) {
+    try {
+      const data = JSON.parse(m[1])
+      const items = data['@type'] === 'ItemList'
+        ? (data.itemListElement || []).map((el) => el.item || el)
+        : [data]
+      for (const item of items) {
+        if (!['RealEstateListing', 'Product'].includes(item['@type'])) continue
+        const price = item.offers?.price || item.price
+        const numPrice = price ? Number(String(price).replace(/[^0-9.]/g, '')) : null
+        if (!numPrice || numPrice < 1000) continue
+        const url = item.url
+        if (!url || (!url.includes('vivanuncios') && !url.startsWith('/'))) continue
+        const fullUrl = url.startsWith('http') ? url : `${BASE}${url}`
+        const addr = item.address || {}
+        listings.push({
+          id: `${SOURCE}_ld_${item['@id'] || Math.random().toString(36).slice(2)}`,
+          title: item.name || 'Propiedad en renta',
+          price: numPrice,
+          neighborhood: addr.neighborhood || addr.addressLocality || null,
+          size: item.floorSize?.value || null,
+          bedrooms: item.numberOfRooms || null,
+          image: cleanImageUrl(Array.isArray(item.image) ? item.image[0] : item.image),
+          url: fullUrl,
+          source: SOURCE,
+        })
       }
-    }
+    } catch {}
   }
-
-  // Strategy 3: Regex on ad cards
-  if (listings.length === 0) {
-    const priceMatches = html.matchAll(/data-ad-id="(\d+)"[\s\S]*?\$([\d,]+)[\s\S]*?<\/div>/gi)
-    for (const m of priceMatches) {
-      listings.push({
-        id: `${SOURCE}_${m[1]}`,
-        title: 'Propiedad en renta',
-        price: Number(m[2].replace(/,/g, '')),
-        neighborhood: null,
-        size: null,
-        bedrooms: null,
-        image: null,
-        url: `${BASE_URL}/v-inmuebles/${m[1]}`,
-        source: SOURCE,
-      })
-    }
-  }
-
   return listings
 }
 
-function parseNextDataAd(ad) {
-  const price =
-    ad.price?.amount ||
-    ad.priceValue ||
-    ad.price ||
-    null
-
-  const location = ad.location || ad.address || {}
-  const neighborhood =
-    location.neighborhood ||
-    location.locality ||
-    location.subLocality ||
-    ad.neighborhoodName ||
-    null
-
-  return {
-    id: `${SOURCE}_${ad.id || ad.adId || Math.random()}`,
-    title: ad.subject || ad.title || 'Propiedad en renta',
-    price: price ? Number(String(price).replace(/[^0-9.]/g, '')) : null,
-    neighborhood: neighborhood || null,
-    size: ad.size || ad.area || ad.attributes?.surfaceTotalFormatted || null,
-    bedrooms: ad.rooms || ad.bedrooms || ad.attributes?.rooms || null,
-    image: ad.mainImage?.href || ad.imageUrl || ad.photos?.[0] || null,
-    url: ad.url ? `${BASE_URL}${ad.url}` : ad.permalink || null,
-    source: SOURCE,
+function extractFromHtml(html) {
+  const listings = []
+  const seen = new Set()
+  // OLX ad links follow pattern /a-renta-.../...
+  const linkMatches = [...html.matchAll(/href="(\/a-renta-[^"]+)"/g)]
+  for (const m of linkMatches) {
+    const url = `${BASE}${m[1]}`
+    if (seen.has(url)) continue
+    seen.add(url)
+    const idx = html.indexOf(m[0])
+    const vicinity = html.slice(Math.max(0, idx - 100), idx + 1000)
+    const priceMatch = vicinity.match(/\$\s*([\d,]+)/)
+    const price = priceMatch ? Number(priceMatch[1].replace(/,/g, '')) : null
+    if (!price || price < 1000) continue
+    const imgMatch = vicinity.match(/src="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+    const titleMatch = vicinity.match(/data-aut-id="itemTitle"[^>]*>([^<]+)/)
+      || vicinity.match(/<h2[^>]*>([^<]+)<\/h2>/)
+    listings.push({
+      id: `${SOURCE}_html_${seen.size}`,
+      title: titleMatch ? titleMatch[1].trim() : 'Propiedad en renta',
+      price,
+      neighborhood: null,
+      size: null,
+      bedrooms: null,
+      image: imgMatch ? imgMatch[1] : null,
+      url,
+      source: SOURCE,
+    })
   }
+  return listings
 }
 
-function parseJsonLdItem(item) {
-  const address = item.address || {}
-  const neighborhood =
-    address.addressLocality ||
-    address.neighborhood ||
-    null
-
-  return {
-    id: `${SOURCE}_${item['@id'] || item.identifier || Math.random()}`,
-    title: item.name || 'Propiedad en renta',
-    price: item.offers?.price ? Number(String(item.offers.price).replace(/[^0-9.]/g, '')) : null,
-    neighborhood: neighborhood || null,
-    size: item.floorSize?.value || null,
-    bedrooms: item.numberOfRooms || item.numberOfBedrooms || null,
-    image: item.image?.[0] || item.image || null,
-    url: item.url || null,
-    source: SOURCE,
-  }
+function cleanImageUrl(url) {
+  if (!url || typeof url !== 'string') return null
+  if (!url.startsWith('http')) return null
+  if (url.includes('placeholder') || url.includes('blank') || url.startsWith('data:')) return null
+  return url
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms))
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)) }

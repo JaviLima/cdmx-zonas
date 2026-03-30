@@ -2,71 +2,66 @@
  * CDMX Zonas — Cloudflare Worker
  *
  * Endpoints:
- *   GET /api/listings      → all scraped listings from KV
- *   GET /api/neighborhoods → avg price per neighborhood from KV
- *   POST /api/scrape       → manual trigger (dev only)
- *
- * Cron: scrape all three sources every 6 hours
+ *   GET /api/listings       → all scraped listings from KV
+ *   GET /api/neighborhoods  → avg price per neighborhood from KV
+ *   GET /api/status         → last scrape time + count
+ *   POST /api/scrape        → manual trigger (immediate scrape)
  */
 
 import { scrapeInmuebles24 } from './scrapers/inmuebles24.js'
 import { scrapeVivanuncios } from './scrapers/vivanuncios.js'
 import { scrapeLamudi } from './scrapers/lamudi.js'
 
-const CORS_HEADERS = {
+const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 }
 
+// Pages scraped per source in each run
+const PAGES_CRON = 10   // Full run via cron (6h interval)
+const PAGES_MANUAL = 5  // Manual /api/scrape trigger
+
 export default {
-  // ── HTTP handler ────────────────────────────────────────────────────────────
   async fetch(request, env) {
     const url = new URL(request.url)
 
-    // CORS preflight
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: CORS_HEADERS })
+      return new Response(null, { status: 204, headers: CORS })
     }
 
-    if (url.pathname === '/api/listings') {
-      return handleListings(env)
+    switch (url.pathname) {
+      case '/api/listings':
+        return handleListings(env)
+      case '/api/neighborhoods':
+        return handleNeighborhoods(env)
+      case '/api/status':
+        return handleStatus(env)
+      case '/api/scrape':
+        if (request.method === 'POST') {
+          // Run scrape inline (manual trigger)
+          const result = await runScrape(env, PAGES_MANUAL)
+          return jsonResponse(result)
+        }
+        return jsonResponse({ error: 'POST only' }, 405)
+      default:
+        return new Response('Not found', { status: 404, headers: CORS })
     }
-
-    if (url.pathname === '/api/neighborhoods') {
-      return handleNeighborhoods(env)
-    }
-
-    if (url.pathname === '/api/scrape' && request.method === 'POST') {
-      // Allow manual trigger in dev/staging
-      const result = await runScrape(env)
-      return jsonResponse(result)
-    }
-
-    if (url.pathname === '/api/status') {
-      return handleStatus(env)
-    }
-
-    return new Response('Not found', { status: 404, headers: CORS_HEADERS })
   },
 
-  // ── Scheduled cron handler (every 6 hours) ──────────────────────────────────
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runScrape(env))
+    ctx.waitUntil(runScrape(env, PAGES_CRON))
   },
 }
 
-// ── Route handlers ────────────────────────────────────────────────────────────
+// ── Route handlers ─────────────────────────────────────────────────────────
 
 async function handleListings(env) {
   try {
     const raw = await env.CDMX_KV.get('listings')
-    if (!raw) {
-      return jsonResponse([])
-    }
-    return jsonResponse(JSON.parse(raw))
+    return jsonResponse(raw ? JSON.parse(raw) : [])
   } catch (err) {
-    console.error('[listings] KV read error:', err)
+    console.error('[listings]', err)
     return jsonResponse([], 500)
   }
 }
@@ -74,116 +69,115 @@ async function handleListings(env) {
 async function handleNeighborhoods(env) {
   try {
     const raw = await env.CDMX_KV.get('neighborhoods')
-    if (!raw) {
-      return jsonResponse({})
-    }
-    return jsonResponse(JSON.parse(raw))
+    return jsonResponse(raw ? JSON.parse(raw) : {})
   } catch (err) {
-    console.error('[neighborhoods] KV read error:', err)
+    console.error('[neighborhoods]', err)
     return jsonResponse({}, 500)
   }
 }
 
 async function handleStatus(env) {
-  const lastRun = await env.CDMX_KV.get('last_scrape')
-  const listingsRaw = await env.CDMX_KV.get('listings')
+  const [lastRun, listingsRaw] = await Promise.all([
+    env.CDMX_KV.get('last_scrape'),
+    env.CDMX_KV.get('listings'),
+  ])
   let count = 0
+  let bySource = {}
   try {
-    count = listingsRaw ? JSON.parse(listingsRaw).length : 0
+    const arr = listingsRaw ? JSON.parse(listingsRaw) : []
+    count = arr.length
+    for (const l of arr) {
+      bySource[l.source] = (bySource[l.source] || 0) + 1
+    }
   } catch {}
-  return jsonResponse({ lastRun, listingCount: count })
+  return jsonResponse({ lastRun, listingCount: count, bySource })
 }
 
-// ── Core scrape pipeline ──────────────────────────────────────────────────────
+// ── Core scrape pipeline ──────────────────────────────────────────────────
 
-async function runScrape(env) {
-  console.log('[scrape] starting...')
+async function runScrape(env, maxPages = PAGES_CRON) {
   const startedAt = new Date().toISOString()
+  console.log(`[scrape] start — ${maxPages} pages per source`)
 
+  // Run all three scrapers concurrently (they each add delays internally)
   const results = await Promise.allSettled([
-    scrapeInmuebles24(3),
-    scrapeVivanuncios(3),
-    scrapeLamudi(3),
+    scrapeInmuebles24(maxPages),
+    scrapeVivanuncios(maxPages),
+    scrapeLamudi(maxPages),
   ])
 
+  const sourceNames = ['inmuebles24', 'vivanuncios', 'lamudi']
   let allListings = []
+  const sourceCounts = {}
 
   results.forEach((r, i) => {
-    const sourceName = ['inmuebles24', 'vivanuncios', 'lamudi'][i]
+    const name = sourceNames[i]
     if (r.status === 'fulfilled') {
       const valid = r.value.filter(isValidListing)
-      console.log(`[scrape] ${sourceName}: ${valid.length} valid listings`)
+      console.log(`[scrape] ${name}: ${valid.length} valid (of ${r.value.length} raw)`)
+      sourceCounts[name] = valid.length
       allListings.push(...valid)
     } else {
-      console.error(`[scrape] ${sourceName} failed:`, r.reason)
+      console.error(`[scrape] ${name} FAILED:`, r.reason?.message || r.reason)
+      sourceCounts[name] = 0
     }
   })
 
   // Deduplicate by URL
-  const seen = new Set()
+  const seenUrls = new Set()
   allListings = allListings.filter((l) => {
     if (!l.url) return true
-    if (seen.has(l.url)) return false
-    seen.add(l.url)
+    if (seenUrls.has(l.url)) return false
+    seenUrls.add(l.url)
     return true
   })
 
-  // Assign stable IDs
+  // Ensure stable IDs
   allListings = allListings.map((l, i) => ({
     ...l,
     id: l.id || `listing_${i}_${Date.now()}`,
   }))
 
   // Compute neighborhood aggregates
-  const neighborhoodMap = computeNeighborhoods(allListings)
+  const neighborhoods = computeNeighborhoods(allListings)
 
-  // Store in KV
+  // Write to KV
   await Promise.all([
     env.CDMX_KV.put('listings', JSON.stringify(allListings)),
-    env.CDMX_KV.put('neighborhoods', JSON.stringify(neighborhoodMap)),
+    env.CDMX_KV.put('neighborhoods', JSON.stringify(neighborhoods)),
     env.CDMX_KV.put('last_scrape', startedAt),
   ])
 
-  console.log(`[scrape] done. ${allListings.length} total listings, ${Object.keys(neighborhoodMap).length} neighborhoods`)
-
-  return {
+  const summary = {
     ok: true,
-    totalListings: allListings.length,
-    neighborhoods: Object.keys(neighborhoodMap).length,
     startedAt,
+    totalListings: allListings.length,
+    totalNeighborhoods: Object.keys(neighborhoods).length,
+    bySource: sourceCounts,
   }
+  console.log('[scrape] done:', JSON.stringify(summary))
+  return summary
 }
 
-// ── Data processing ───────────────────────────────────────────────────────────
+// ── Data processing ───────────────────────────────────────────────────────
 
-/**
- * Compute average price, listing count, and source set per neighborhood.
- * Returns: { [neighborhoodName]: { avgPrice, count, sources: string[] } }
- */
 function computeNeighborhoods(listings) {
   const groups = {}
-
   for (const l of listings) {
     const name = normalizeNeighborhood(l.neighborhood)
     if (!name || !l.price || l.price < 1000 || l.price > 500000) continue
-
-    if (!groups[name]) {
-      groups[name] = { prices: [], sources: new Set() }
-    }
+    if (!groups[name]) groups[name] = { prices: [], sources: new Set() }
     groups[name].prices.push(l.price)
     groups[name].sources.add(l.source)
   }
-
   const result = {}
   for (const [name, data] of Object.entries(groups)) {
-    const avg = Math.round(data.prices.reduce((a, b) => a + b, 0) / data.prices.length)
     result[name] = {
-      avgPrice: avg,
+      avgPrice: Math.round(data.prices.reduce((a, b) => a + b, 0) / data.prices.length),
       count: data.prices.length,
       sources: [...data.sources],
     }
   }
-
   return result
 }
 
@@ -192,26 +186,27 @@ function normalizeNeighborhood(name) {
   return name
     .trim()
     .replace(/\s+/g, ' ')
-    .replace(/col\./i, 'Colonia')
+    .replace(/\bcol\.\s*/i, '')
     .replace(/^colonia\s+/i, '')
+    .replace(/\.$/, '')
 }
 
 function isValidListing(l) {
   if (!l || typeof l !== 'object') return false
+  if (!l.source) return false
   if (!l.price || typeof l.price !== 'number') return false
   if (l.price < 1000 || l.price > 500000) return false
-  if (!l.source) return false
+  if (!l.url || typeof l.url !== 'string') return false
+  // Reject if URL is just the homepage (means we didn't get a real listing URL)
+  if (/^https?:\/\/www\.(inmuebles24|vivanuncios|lamudi)\.[a-z.]+\/?$/.test(l.url)) return false
   return true
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      ...CORS_HEADERS,
-      'Content-Type': 'application/json',
-    },
+    headers: { ...CORS, 'Content-Type': 'application/json' },
   })
 }
