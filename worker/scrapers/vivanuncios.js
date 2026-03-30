@@ -25,7 +25,7 @@ export async function scrapeVivanuncios(maxPages = 5) {
     try {
       const html = await fetchHTML(url, BASE)
       if (!html) break
-      const listings = extractListings(html, url)
+      const listings = extractListings(html)
       if (!listings.length) break
       all.push(...listings)
       await sleep(700 + Math.random() * 700)
@@ -52,7 +52,7 @@ async function fetchHTML(url, referer) {
   return res.text()
 }
 
-function extractListings(html, pageUrl) {
+function extractListings(html) {
   // Strategy 1: __NEXT_DATA__ (OLX/Vivanuncios runs Next.js SSR)
   const ndMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/)
   if (ndMatch) {
@@ -124,15 +124,16 @@ function mapOlxAd(ad) {
   const numPrice = price ? Number(String(price).replace(/[^0-9.]/g, '')) : null
   if (!numPrice || numPrice < 1000) return null
 
-  // URL: OLX stores relative or absolute URL
+  // URL: must be an individual listing page, not the search root
   const rawUrl = ad.url || ad.permalink || ad.adUrl || ''
   const url = rawUrl.startsWith('http') ? rawUrl : rawUrl ? `${BASE}${rawUrl}` : null
-  // Reject if it's just the search page root
+  // Reject if it's just the search page root or doesn't look like a listing
   if (!url || url === BASE || url === `${BASE}/`) return null
+  if (!url.includes('/a-renta-') && !url.match(/\/\d+$/)) return null
 
-  // Image: OLX stores images array with cdn URLs
+  // Image: JSON-LD image field or OLX images array, then gallery fallback
   const imgs = ad.images || ad.pictures || []
-  const thumb =
+  const rawThumb =
     ad.thumbnail ||
     ad.mainImage ||
     ad.thumbnailUrl ||
@@ -155,7 +156,7 @@ function mapOlxAd(ad) {
     neighborhood: neighborhood || null,
     size: ad.parameters?.size || ad.size || ad.area || null,
     bedrooms: ad.parameters?.rooms || ad.rooms || ad.bedrooms || null,
-    image: cleanImageUrl(thumb),
+    image: cleanImageUrl(rawThumb),
     url,
     source: SOURCE,
   }
@@ -178,7 +179,11 @@ function extractFromJsonLd(html) {
         const url = item.url
         if (!url || (!url.includes('vivanuncios') && !url.startsWith('/'))) continue
         const fullUrl = url.startsWith('http') ? url : `${BASE}${url}`
+        // Reject if not a listing URL
+        if (fullUrl === BASE || fullUrl === `${BASE}/`) continue
         const addr = item.address || {}
+        // JSON-LD image field priority
+        const rawImage = Array.isArray(item.image) ? item.image[0] : item.image
         listings.push({
           id: `${SOURCE}_ld_${item['@id'] || Math.random().toString(36).slice(2)}`,
           title: item.name || 'Propiedad en renta',
@@ -186,7 +191,7 @@ function extractFromJsonLd(html) {
           neighborhood: addr.neighborhood || addr.addressLocality || null,
           size: item.floorSize?.value || null,
           bedrooms: item.numberOfRooms || null,
-          image: cleanImageUrl(Array.isArray(item.image) ? item.image[0] : item.image),
+          image: cleanImageUrl(rawImage),
           url: fullUrl,
           source: SOURCE,
         })
@@ -210,7 +215,16 @@ function extractFromHtml(html) {
     const priceMatch = vicinity.match(/\$\s*([\d,]+)/)
     const price = priceMatch ? Number(priceMatch[1].replace(/,/g, '')) : null
     if (!price || price < 1000) continue
-    const imgMatch = vicinity.match(/src="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+
+    // Try JSON-LD image, then gallery/data-gallery img, then src with image extension
+    let image = null
+    const galleryMatch = vicinity.match(/(?:class="[^"]*gallery[^"]*"|data-gallery)[^>]*>[\s\S]*?<img[^>]+src="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+    if (!image && galleryMatch) image = cleanImageUrl(galleryMatch[1])
+    if (!image) {
+      const imgMatch = vicinity.match(/src="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+      if (imgMatch) image = cleanImageUrl(imgMatch[1])
+    }
+
     const titleMatch = vicinity.match(/data-aut-id="itemTitle"[^>]*>([^<]+)/)
       || vicinity.match(/<h2[^>]*>([^<]+)<\/h2>/)
     listings.push({
@@ -220,7 +234,7 @@ function extractFromHtml(html) {
       neighborhood: null,
       size: null,
       bedrooms: null,
-      image: imgMatch ? imgMatch[1] : null,
+      image,
       url,
       source: SOURCE,
     })
@@ -230,8 +244,16 @@ function extractFromHtml(html) {
 
 function cleanImageUrl(url) {
   if (!url || typeof url !== 'string') return null
-  if (!url.startsWith('http')) return null
-  if (url.includes('placeholder') || url.includes('blank') || url.startsWith('data:')) return null
+  if (!url.startsWith('https://')) return null
+  const lower = url.toLowerCase()
+  if (
+    lower.includes('placeholder') ||
+    lower.includes('default') ||
+    lower.includes('no-image') ||
+    lower.includes('logo') ||
+    lower.includes('blank') ||
+    lower.startsWith('data:')
+  ) return null
   return url
 }
 

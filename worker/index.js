@@ -2,7 +2,7 @@
  * CDMX Zonas — Cloudflare Worker
  *
  * Endpoints:
- *   GET /api/listings       → all scraped listings from KV
+ *   GET /api/listings       → best-deal listings (scored, filtered, sorted)
  *   GET /api/neighborhoods  → avg price per neighborhood from KV
  *   GET /api/status         → last scrape time + count
  *   POST /api/scrape        → manual trigger (immediate scrape)
@@ -39,7 +39,6 @@ export default {
         return handleStatus(env)
       case '/api/scrape':
         if (request.method === 'POST') {
-          // Run scrape inline (manual trigger)
           const result = await runScrape(env, PAGES_MANUAL)
           return jsonResponse(result)
         }
@@ -99,7 +98,6 @@ async function runScrape(env, maxPages = PAGES_CRON) {
   const startedAt = new Date().toISOString()
   console.log(`[scrape] start — ${maxPages} pages per source`)
 
-  // Run all three scrapers concurrently (they each add delays internally)
   const results = await Promise.allSettled([
     scrapeInmuebles24(maxPages),
     scrapeVivanuncios(maxPages),
@@ -138,12 +136,15 @@ async function runScrape(env, maxPages = PAGES_CRON) {
     id: l.id || `listing_${i}_${Date.now()}`,
   }))
 
+  // Score listings as best deals and filter/sort
+  const scoredListings = scoreBestDeals(allListings)
+
   // Compute neighborhood aggregates
   const neighborhoods = computeNeighborhoods(allListings)
 
   // Write to KV
   await Promise.all([
-    env.CDMX_KV.put('listings', JSON.stringify(allListings)),
+    env.CDMX_KV.put('listings', JSON.stringify(scoredListings)),
     env.CDMX_KV.put('neighborhoods', JSON.stringify(neighborhoods)),
     env.CDMX_KV.put('last_scrape', startedAt),
   ])
@@ -151,12 +152,80 @@ async function runScrape(env, maxPages = PAGES_CRON) {
   const summary = {
     ok: true,
     startedAt,
-    totalListings: allListings.length,
+    totalListings: scoredListings.length,
     totalNeighborhoods: Object.keys(neighborhoods).length,
     bySource: sourceCounts,
   }
   console.log('[scrape] done:', JSON.stringify(summary))
   return summary
+}
+
+// ── Best deal scoring ─────────────────────────────────────────────────────
+
+function scoreBestDeals(listings) {
+  // Only score listings that have both price and size (needed for price/m²)
+  const scoreable = listings.filter((l) => l.price && l.size && l.size > 0 && l.neighborhood)
+  const unscorable = listings.filter((l) => !l.price || !l.size || l.size <= 0 || !l.neighborhood)
+
+  // Compute median price per m² per neighborhood
+  const neighborhoodPpm2 = {}
+  for (const l of scoreable) {
+    const name = normalizeNeighborhood(l.neighborhood)
+    if (!name) continue
+    if (!neighborhoodPpm2[name]) neighborhoodPpm2[name] = []
+    neighborhoodPpm2[name].push(l.price / l.size)
+  }
+
+  // Median helper
+  function median(arr) {
+    const sorted = [...arr].sort((a, b) => a - b)
+    const mid = Math.floor(sorted.length / 2)
+    return sorted.length % 2 === 0
+      ? (sorted[mid - 1] + sorted[mid]) / 2
+      : sorted[mid]
+  }
+
+  const medians = {}
+  for (const [name, vals] of Object.entries(neighborhoodPpm2)) {
+    medians[name] = median(vals)
+  }
+
+  // Score each scoreable listing
+  const scored = scoreable.map((l) => {
+    const name = normalizeNeighborhood(l.neighborhood)
+    const med = medians[name]
+    if (!med) return { ...l, dealScore: null, dealLabel: null }
+    const ppm2 = l.price / l.size
+    const score = (med - ppm2) / med
+    const roundedScore = Math.round(score * 100) / 100
+
+    let dealLabel = null
+    if (roundedScore > 0.30) dealLabel = 'Oferta excepcional'
+    else if (roundedScore > 0.20) dealLabel = 'Muy buena oferta'
+    else if (roundedScore > 0.10) dealLabel = 'Buena oferta'
+
+    return { ...l, dealScore: roundedScore, dealLabel }
+  })
+
+  // Add unscorable listings with no deal info
+  const withUnscorable = [
+    ...scored,
+    ...unscorable.map((l) => ({ ...l, dealScore: null, dealLabel: null })),
+  ]
+
+  // Filter: only listings with dealScore > 0.10 (at least 10% cheaper), plus unscorable
+  const filtered = withUnscorable.filter((l) => l.dealScore === null || l.dealScore > 0.10)
+
+  // Sort by dealScore descending (null scores go last)
+  filtered.sort((a, b) => {
+    if (a.dealScore === null && b.dealScore === null) return 0
+    if (a.dealScore === null) return 1
+    if (b.dealScore === null) return -1
+    return b.dealScore - a.dealScore
+  })
+
+  // Cap at 100 listings
+  return filtered.slice(0, 100)
 }
 
 // ── Data processing ───────────────────────────────────────────────────────
@@ -197,7 +266,7 @@ function isValidListing(l) {
   if (!l.price || typeof l.price !== 'number') return false
   if (l.price < 1000 || l.price > 500000) return false
   if (!l.url || typeof l.url !== 'string') return false
-  // Reject if URL is just the homepage (means we didn't get a real listing URL)
+  // Reject if URL is just the homepage
   if (/^https?:\/\/www\.(inmuebles24|vivanuncios|lamudi)\.[a-z.]+\/?$/.test(l.url)) return false
   return true
 }

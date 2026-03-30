@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import Map from '../components/Map.jsx'
 
+const WORKER_URL = 'https://cdmx-zonas-worker.cdmx-zonas.workers.dev'
+
 export default function MapView() {
   const [geojson, setGeojson] = useState(null)
   const [neighborhoodData, setNeighborhoodData] = useState({})
@@ -13,7 +15,6 @@ export default function MapView() {
       setLoading(true)
       setError(null)
 
-      // Load GeoJSON
       let geo = null
       try {
         const res = await fetch('/cdmx-neighborhoods.geojson')
@@ -26,12 +27,10 @@ export default function MapView() {
         return
       }
 
-      // Try live Worker API first
       try {
-        const apiRes = await fetch('/api/neighborhoods')
+        const apiRes = await fetch(`${WORKER_URL}/api/neighborhoods`)
         if (!apiRes.ok) throw new Error('API unavailable')
         const data = await apiRes.json()
-        // Check if we actually got neighborhood data (non-empty object)
         if (data && typeof data === 'object' && Object.keys(data).length > 0) {
           setNeighborhoodData(data)
           setUsingMock(false)
@@ -39,7 +38,6 @@ export default function MapView() {
           throw new Error('Empty response')
         }
       } catch {
-        // Fall back to mock data generated from GeoJSON feature names
         setNeighborhoodData(buildMockData(geo))
         setUsingMock(true)
       }
@@ -52,10 +50,10 @@ export default function MapView() {
 
   if (loading) {
     return (
-      <div className="w-full h-full flex items-center justify-center">
+      <div className="w-full h-full flex items-center justify-center bg-[#F8FAFC]">
         <div className="text-center">
-          <div className="w-8 h-8 border-2 border-[#6366f1] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-sm text-gray-500">Cargando mapa...</p>
+          <div className="w-7 h-7 border-2 border-[#2563EB] border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+          <p className="text-xs text-[#6B7280]">Cargando mapa...</p>
         </div>
       </div>
     )
@@ -63,8 +61,8 @@ export default function MapView() {
 
   if (error) {
     return (
-      <div className="w-full h-full flex items-center justify-center p-8">
-        <p className="text-sm text-gray-500 text-center max-w-sm">{error}</p>
+      <div className="w-full h-full flex items-center justify-center p-8 bg-[#F8FAFC]">
+        <p className="text-sm text-[#6B7280] text-center max-w-sm">{error}</p>
       </div>
     )
   }
@@ -73,15 +71,14 @@ export default function MapView() {
     <div className="relative w-full h-full flex flex-col">
       <Map geojson={geojson} neighborhoodData={neighborhoodData} />
       {usingMock && (
-        <div className="absolute top-12 right-3 z-[1000] bg-amber-50 border border-amber-200 rounded px-3 py-1.5 text-xs text-amber-700 pointer-events-none">
-          Datos de ejemplo — despliega el Worker para datos reales
+        <div className="absolute top-12 right-3 z-[1000] bg-white border border-[#E5E7EB] rounded px-3 py-1.5 text-[10px] text-[#6B7280] pointer-events-none">
+          Datos de ejemplo
         </div>
       )}
     </div>
   )
 }
 
-// Build mock neighborhood data from GeoJSON feature names
 function buildMockData(geojson) {
   const KNOWN_PRICES = {
     'Lomas de Chapultepec': 52000, 'Santa Fe': 42000, 'Santa Fe Norte': 38000,

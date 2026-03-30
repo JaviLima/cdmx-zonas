@@ -50,6 +50,13 @@ async function fetchHTML(url, referer) {
   return res.text()
 }
 
+// Extract og:image from HTML meta tag
+function extractOgImage(html) {
+  const m = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)
+    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i)
+  return m ? cleanImageUrl(m[1]) : null
+}
+
 async function extractListings(html) {
   // Strategy 1: window.__INITIAL_STATE__ or similar NAVENT patterns
   const statePatterns = [
@@ -112,13 +119,13 @@ function extractFromNextData(nd) {
   ]
   for (const arr of candidates) {
     if (Array.isArray(arr) && arr.length) {
-      return arr.map(mapNaventItem).filter(Boolean)
+      return arr.map((item) => mapNaventItem(item, pp)).filter(Boolean)
     }
   }
   return []
 }
 
-function mapNaventItem(item) {
+function mapNaventItem(item, pageProps) {
   if (!item) return null
   const price =
     item.priceOperationType?.price?.amount ||
@@ -130,15 +137,31 @@ function mapNaventItem(item) {
   const numPrice = price ? Number(String(price).replace(/[^0-9.]/g, '')) : null
   if (!numPrice || numPrice < 1000) return null
 
+  // URL: must point to individual listing page with /propiedades/ path
   const permalink = item.permalink || item.url || ''
   const url = permalink.startsWith('http') ? permalink : permalink ? `${BASE}${permalink}` : null
-  if (!url || url === BASE || url === `${BASE}/`) return null
+  if (!url || !url.includes('/propiedades/')) return null
 
-  const images = item.photos || item.images || []
-  const image =
-    (Array.isArray(images) && images.length > 0)
-      ? (images[0]?.url || images[0]?.href || images[0])
-      : item.mainPhoto || item.thumbnail || null
+  // Image priority: schema.org image[0] → __NEXT_DATA__ listing photos → photos array → thumbnail
+  let image = null
+
+  // Try __NEXT_DATA__ pageProps.listing.photos[0].url (for detail page data embedded in search)
+  if (!image && pageProps?.listing?.photos?.length) {
+    image = cleanImageUrl(pageProps.listing.photos[0]?.url || null)
+  }
+
+  // Try photos array on the item itself
+  if (!image) {
+    const images = item.photos || item.images || []
+    if (Array.isArray(images) && images.length > 0) {
+      image = cleanImageUrl(images[0]?.url || images[0]?.href || images[0])
+    }
+  }
+
+  // Try mainPhoto / thumbnail
+  if (!image) {
+    image = cleanImageUrl(item.mainPhoto || item.thumbnail || null)
+  }
 
   const loc = item.location || item.address || {}
   const neighborhood =
@@ -155,7 +178,7 @@ function mapNaventItem(item) {
     neighborhood: neighborhood || null,
     size: item.totalArea || item.coveredArea || item.floorSize || null,
     bedrooms: item.rooms?.bedrooms ?? item.bedrooms ?? item.numberOfBedrooms ?? null,
-    image: cleanImageUrl(image),
+    image,
     url,
     source: SOURCE,
   }
@@ -176,8 +199,13 @@ function extractFromJsonLd(html) {
         const numPrice = price ? Number(String(price).replace(/[^0-9.]/g, '')) : null
         if (!numPrice || numPrice < 1000) continue
         const url = item.url
-        if (!url || !url.includes(BASE.replace('https://', ''))) continue
+        if (!url || !url.includes('/propiedades/')) continue
         const addr = item.address || {}
+
+        // Schema.org image[0] priority
+        const rawImage = Array.isArray(item.image) ? item.image[0] : item.image
+        const image = cleanImageUrl(rawImage) || extractOgImage(html)
+
         listings.push({
           id: `${SOURCE}_ld_${item.identifier || item['@id'] || Math.random().toString(36).slice(2)}`,
           title: item.name || 'Propiedad en renta',
@@ -185,7 +213,7 @@ function extractFromJsonLd(html) {
           neighborhood: addr.neighborhood || addr.addressLocality || null,
           size: item.floorSize?.value || null,
           bedrooms: item.numberOfRooms || item.numberOfBedrooms || null,
-          image: cleanImageUrl(Array.isArray(item.image) ? item.image[0] : item.image),
+          image,
           url,
           source: SOURCE,
         })
@@ -199,29 +227,18 @@ async function extractWithRewriter(html) {
   const listings = []
   const seen = new Set()
 
-  class CardHandler {
-    constructor() { this.href = null; this.price = null; this.img = null; this.title = null }
-    element(el) {
-      const href = el.getAttribute('href')
-      if (href && href.includes('/propiedades/')) {
-        this.href = href.startsWith('http') ? href : `${BASE}${href}`
-      }
-    }
-  }
-
   // Fast regex fallback for listing URLs and prices
   const hrefMatches = [...html.matchAll(/href="(\/propiedades\/[^"]+\.html)"/g)]
   for (const m of hrefMatches) {
     const url = `${BASE}${m[1]}`
     if (seen.has(url)) continue
     seen.add(url)
-    // Try to find price near this reference
     const idx = html.indexOf(m[0])
     const vicinity = html.slice(Math.max(0, idx - 200), idx + 800)
     const priceMatch = vicinity.match(/\$\s*([\d,]+)/)
     const price = priceMatch ? Number(priceMatch[1].replace(/,/g, '')) : null
     if (!price || price < 1000) continue
-    const imgMatch = vicinity.match(/src="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+    const imgMatch = vicinity.match(/src="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
     const titleMatch = vicinity.match(/class="[^"]*posting-title[^"]*"[^>]*>([^<]+)</)
     listings.push({
       id: `${SOURCE}_card_${seen.size}`,
@@ -230,7 +247,7 @@ async function extractWithRewriter(html) {
       neighborhood: null,
       size: null,
       bedrooms: null,
-      image: imgMatch ? imgMatch[1] : null,
+      image: imgMatch ? cleanImageUrl(imgMatch[1]) : null,
       url,
       source: SOURCE,
     })
@@ -240,9 +257,16 @@ async function extractWithRewriter(html) {
 
 function cleanImageUrl(url) {
   if (!url || typeof url !== 'string') return null
-  if (!url.startsWith('http')) return null
-  // Remove lazy-load placeholders
-  if (url.includes('placeholder') || url.includes('blank.gif') || url.includes('data:image')) return null
+  if (!url.startsWith('https://')) return null
+  const lower = url.toLowerCase()
+  if (
+    lower.includes('placeholder') ||
+    lower.includes('default') ||
+    lower.includes('no-image') ||
+    lower.includes('logo') ||
+    lower.includes('blank.gif') ||
+    lower.startsWith('data:image')
+  ) return null
   return url
 }
 

@@ -4,6 +4,8 @@ import ListingCard from '../components/ListingCard.jsx'
 import ComparePanel from '../components/ComparePanel.jsx'
 import { MOCK_LISTINGS } from '../mockData.js'
 
+const WORKER_URL = 'https://cdmx-zonas-worker.cdmx-zonas.workers.dev'
+
 const DEFAULT_PRICE_RANGE = { min: 3000, max: 80000 }
 const DEFAULT_FILTERS = {
   neighborhood: '',
@@ -11,6 +13,7 @@ const DEFAULT_FILTERS = {
   maxPrice: 80000,
   bedrooms: '',
   sources: ['inmuebles24', 'vivanuncios', 'lamudi'],
+  onlyDeals: true,
 }
 
 export default function SearchView() {
@@ -18,14 +21,14 @@ export default function SearchView() {
   const [loading, setLoading] = useState(true)
   const [usingMock, setUsingMock] = useState(false)
   const [filters, setFilters] = useState(DEFAULT_FILTERS)
-  const [selected, setSelected] = useState([]) // up to 3 listing objects
+  const [selected, setSelected] = useState([])
   const [priceRange, setPriceRange] = useState(DEFAULT_PRICE_RANGE)
 
   useEffect(() => {
     async function load() {
       setLoading(true)
       try {
-        const res = await fetch('/api/listings')
+        const res = await fetch(`${WORKER_URL}/api/listings`)
         if (!res.ok) throw new Error('API not available')
         const data = await res.json()
         if (!Array.isArray(data) || data.length === 0) throw new Error('Empty')
@@ -70,6 +73,7 @@ export default function SearchView() {
         }
       }
       if (!filters.sources.includes(l.source)) return false
+      if (filters.onlyDeals && !(l.dealScore != null && l.dealScore > 0.10)) return false
       return true
     })
   }, [listings, filters])
@@ -90,7 +94,7 @@ export default function SearchView() {
   const compareBottomPadding = selected.length > 0 ? 'pb-52' : 'pb-4'
 
   return (
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-full overflow-hidden bg-[#F8FAFC]">
       <FilterBar
         filters={filters}
         onChange={setFilters}
@@ -99,10 +103,10 @@ export default function SearchView() {
       />
 
       {/* Results area */}
-      <div className={`flex-1 overflow-y-auto px-4 pt-4 ${compareBottomPadding}`}>
+      <div className={`flex-1 overflow-y-auto px-4 pt-3 ${compareBottomPadding}`}>
         {/* Status bar */}
         <div className="flex items-center justify-between mb-3">
-          <p className="text-sm text-gray-500">
+          <p className="text-xs text-[#6B7280]">
             {loading ? (
               'Cargando anuncios...'
             ) : (
@@ -112,34 +116,36 @@ export default function SearchView() {
               </>
             )}
           </p>
-          {selected.length > 0 && (
-            <p className="text-xs text-[#6366f1] font-medium">
-              {selected.length}/3 seleccionados para comparar
-            </p>
-          )}
-          {usingMock && (
-            <span className="text-xs text-amber-600 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded">
-              Datos de ejemplo
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {selected.length > 0 && (
+              <p className="text-xs text-[#2563EB] font-medium">
+                {selected.length}/3 para comparar
+              </p>
+            )}
+            {usingMock && !loading && (
+              <span className="text-[10px] text-[#6B7280] bg-[#F8FAFC] border border-[#E5E7EB] px-2 py-0.5 rounded">
+                Datos de ejemplo
+              </span>
+            )}
+          </div>
         </div>
 
         {loading ? (
           <div className="flex items-center justify-center py-16">
-            <div className="w-8 h-8 border-2 border-[#6366f1] border-t-transparent rounded-full animate-spin" />
+            <div className="w-7 h-7 border-2 border-[#2563EB] border-t-transparent rounded-full animate-spin" />
           </div>
         ) : filtered.length === 0 ? (
           <div className="text-center py-16">
-            <p className="text-gray-400 text-sm">No se encontraron anuncios con esos filtros.</p>
+            <p className="text-[#6B7280] text-sm">No se encontraron anuncios con esos filtros.</p>
             <button
               onClick={() => setFilters({ ...DEFAULT_FILTERS, minPrice: priceRange.min, maxPrice: priceRange.max })}
-              className="mt-3 text-sm text-[#6366f1] underline"
+              className="mt-3 text-sm text-[#2563EB] underline"
             >
               Limpiar filtros
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          <div className="flex flex-col gap-2">
             {filtered.map((listing) => (
               <ListingCard
                 key={listing.id}
@@ -152,7 +158,6 @@ export default function SearchView() {
         )}
       </div>
 
-      {/* Compare panel */}
       <ComparePanel listings={selected} onRemove={removeFromCompare} />
     </div>
   )

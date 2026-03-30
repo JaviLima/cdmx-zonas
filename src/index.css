@@ -17,6 +17,7 @@
 
   body {
     font-family: 'Inter', system-ui, sans-serif;
+    font-weight: 400;
     color: #111827;
     background: #ffffff;
     -webkit-font-smoothing: antialiased;
@@ -27,15 +28,14 @@
   .tab-fade {
     animation: fadeIn 150ms ease-in-out;
   }
+  .font-500 {
+    font-weight: 500;
+  }
 }
 
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* Leaflet overrides */
@@ -45,7 +45,7 @@
 
 .leaflet-popup-content-wrapper {
   border-radius: 8px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid #E5E7EB;
   box-shadow: none;
   padding: 0;
 }
@@ -60,51 +60,56 @@
 }
 
 .neighborhood-popup {
-  min-width: 220px;
-  padding: 14px 16px;
+  min-width: 200px;
+  padding: 12px 14px;
 }
 
 .neighborhood-popup h3 {
-  font-weight: 600;
-  font-size: 15px;
+  font-weight: 500;
+  font-size: 14px;
   color: #111827;
-  margin: 0 0 8px 0;
-}
-
-.neighborhood-popup .price {
-  font-size: 20px;
-  font-weight: 700;
-  color: #6366f1;
   margin: 0 0 6px 0;
 }
 
+.neighborhood-popup .price {
+  font-size: 18px;
+  font-weight: 500;
+  color: #2563EB;
+  margin: 0 0 4px 0;
+}
+
 .neighborhood-popup .meta {
-  font-size: 13px;
-  color: #6b7280;
-  margin: 0 0 10px 0;
+  font-size: 12px;
+  color: #6B7280;
+  margin: 0 0 8px 0;
 }
 
 .neighborhood-popup .sources {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
 }
 
-/* Custom scrollbar */
+/* Horizontal chip scrollbar hide */
+.overflow-x-auto::-webkit-scrollbar {
+  display: none;
+}
+
+/* Custom scrollbar for content areas */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #f9fafb;
+  background: #F8FAFC;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #d1d5db;
+  background: #E5E7EB;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #9ca3af;
+  background: #6B7280;
 }

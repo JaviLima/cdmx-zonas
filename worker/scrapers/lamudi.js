@@ -120,8 +120,15 @@ function mapJsonLdItem(item) {
   const url = item.url
   if (!url) return null
   const fullUrl = url.startsWith('http') ? url : `${BASE}${url}`
+  // Must look like a property listing
+  if (!fullUrl.includes('lamudi') || !fullUrl.endsWith('.html')) return null
   const addr = item.address || {}
+
+  // JSON-LD image field priority, then .listing-thumbnails img fallback
   const imgs = Array.isArray(item.image) ? item.image : item.image ? [item.image] : []
+  let image = cleanImageUrl(imgs[0] || null)
+  if (!image) image = extractThumbnailsImage(null) // will be null without html context
+
   return {
     id: `${SOURCE}_ld_${item['@id'] || item.identifier || Math.random().toString(36).slice(2)}`,
     title: item.name || 'Propiedad en renta',
@@ -129,10 +136,16 @@ function mapJsonLdItem(item) {
     neighborhood: addr.neighborhood || addr.addressLocality || addr.sublocality || null,
     size: item.floorSize?.value || item.lotSize?.value || null,
     bedrooms: item.numberOfRooms || item.numberOfBedrooms || null,
-    image: cleanImageUrl(imgs[0] || null),
+    image,
     url: fullUrl,
     source: SOURCE,
   }
+}
+
+function extractThumbnailsImage(vicinity) {
+  if (!vicinity) return null
+  const m = vicinity.match(/class="[^"]*listing-thumbnails[^"]*"[^>]*>[\s\S]*?<img[^>]+src="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+  return m ? cleanImageUrl(m[1]) : null
 }
 
 function extractFromStateObject(state) {
@@ -214,7 +227,14 @@ function extractFromHtml(html) {
       vicinity.match(/\$\s*([\d,]+)/)
     const price = priceMatch ? Number(priceMatch[1].replace(/,/g, '')) : null
     if (!price || price < 1000) continue
-    const imgMatch = vicinity.match(/(?:src|data-src)="(https?:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+
+    // Try .listing-thumbnails first img, then any src with image extension
+    let image = extractThumbnailsImage(vicinity)
+    if (!image) {
+      const imgMatch = vicinity.match(/(?:src|data-src)="(https:\/\/[^"]+\.(?:jpg|jpeg|png|webp)[^"]*)"/i)
+      if (imgMatch) image = cleanImageUrl(imgMatch[1])
+    }
+
     const titleMatch =
       vicinity.match(/class="[^"]*listing-name[^"]*"[^>]*>([^<]+)</) ||
       vicinity.match(/<h2[^>]*>([^<]+)<\/h2>/) ||
@@ -229,7 +249,7 @@ function extractFromHtml(html) {
       neighborhood: neighborhoodMatch ? neighborhoodMatch[1].trim() : null,
       size: sizeMatch ? Number(sizeMatch[1]) : null,
       bedrooms: bedroomsMatch ? Number(bedroomsMatch[1]) : null,
-      image: imgMatch ? imgMatch[1] : null,
+      image,
       url,
       source: SOURCE,
     })
@@ -239,8 +259,16 @@ function extractFromHtml(html) {
 
 function cleanImageUrl(url) {
   if (!url || typeof url !== 'string') return null
-  if (!url.startsWith('http')) return null
-  if (url.includes('placeholder') || url.includes('blank') || url.startsWith('data:')) return null
+  if (!url.startsWith('https://')) return null
+  const lower = url.toLowerCase()
+  if (
+    lower.includes('placeholder') ||
+    lower.includes('default') ||
+    lower.includes('no-image') ||
+    lower.includes('logo') ||
+    lower.includes('blank') ||
+    lower.startsWith('data:')
+  ) return null
   return url
 }
 
