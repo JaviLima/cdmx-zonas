@@ -48,7 +48,7 @@ export default function SearchView() {
         const min = Math.floor(Math.min(...prices) / 500) * 500
         const max = Math.ceil(Math.max(...prices) / 500) * 500
         setPriceRange({ min, max })
-        setFilters((f) => ({ ...f, minPrice: min, maxPrice: max }))
+        setFilters((f) => ({ ...f, minPrice: min, maxPrice: max, onlyDeals: false }))
       }
       setLoading(false)
     }
@@ -73,7 +73,7 @@ export default function SearchView() {
         }
       }
       if (!filters.sources.includes(l.source)) return false
-      if (filters.onlyDeals && !(l.dealScore != null && l.dealScore > 0.10)) return false
+      if (filters.onlyDeals && l.dealScore != null && l.dealScore <= 0.10) return false
       return true
     })
   }, [listings, filters])
